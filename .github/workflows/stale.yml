@@ -12,7 +12,8 @@ on:
 jobs:
   stale:
 
-    runs-on: kalana-ci
+    runs-on: [self-hosted, kalana-ci]
+    timeout-minutes: 10
     permissions:
       issues: write
       pull-requests: write
