@@ -4,27 +4,82 @@
 name: WAR CI
 
 on:
+  pull_request:
+    branches: [dev]
   push:
+    branches: [dev]
     tags:
       - 'v*' # Push events to matching v*, i.e. v1.0, v20.15.10
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: war-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ !startsWith(github.ref, 'refs/tags/') }}
 
 jobs:
   build:
-
-    runs-on: ubuntu-latest
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: kalana-ci
+    timeout-minutes: 30
 
     steps:
-    - uses: actions/checkout@v3
+    - name: Install pinned Ant without system package changes
+      shell: bash
+      run: |
+        set -euo pipefail
+        curl --fail --silent --show-error --location \
+          https://archive.apache.org/dist/ant/binaries/apache-ant-1.10.15-bin.tar.gz \
+          --output "$RUNNER_TEMP/ant.tar.gz"
+        echo "d78427aff207592c024ff1552dc04f7b57065a195c42d398fcffe7a0145e8d00cd46786f5aa52e77ab0fdf81334f065eb8011eecd2b48f7228e97ff4cb20d16c  $RUNNER_TEMP/ant.tar.gz" | sha512sum --check -
+        mkdir -p "$RUNNER_TEMP/ant"
+        tar -xzf "$RUNNER_TEMP/ant.tar.gz" --strip-components=1 -C "$RUNNER_TEMP/ant"
+        echo "$RUNNER_TEMP/ant/bin" >> "$GITHUB_PATH"
+    - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      with:
+        persist-credentials: false
     - name: Set up JDK 1.8
-      uses: actions/setup-java@v3
+      uses: actions/setup-java@b843ebf9b913146b38da2eaa7aeddf76074ae1ad
       with:
         distribution: 'zulu'
         java-version: '8'
+    - name: Set up Python for archive verification
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.13'
     - name: Build war with Ant
+      run: ant -f etc/build/build.xml war
+    - name: Verify WAR contains the editor and compiled server
+      shell: python3 {0}
       run: |
-        cd etc/build
-        ant war
+        import zipfile
+        with zipfile.ZipFile('build/draw.war') as archive:
+            names = archive.namelist()
+            assert archive.testzip() is None, 'WAR archive is corrupt'
+            assert 'index.html' in names, 'Editor entrypoint missing from WAR'
+            assert 'WEB-INF/web.xml' in names, 'Servlet configuration missing from WAR'
+            assert any(name.startswith('WEB-INF/classes/') and name.endswith('.class') for name in names), 'Compiled server classes missing from WAR'
+    - uses: actions/upload-artifact@v4
+      with:
+        name: drawio-war
+        path: build/draw.war
+        if-no-files-found: error
+        retention-days: 7
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: build
+    runs-on: kalana-ci
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+    - uses: actions/download-artifact@v4
+      with:
+        name: drawio-war
+        path: build
     - name: Create Release
-      uses: softprops/action-gh-release@v1
+      uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64
       with:
         files: build/draw.war
